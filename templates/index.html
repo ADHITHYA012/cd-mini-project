@@ -10,14 +10,19 @@
 
 <div class="container">
 
-    <h1>AI-Assisted Register Allocation and Instruction Selection</h1>
+    <div class="header">
+        <h1>🚀 AI Compiler Optimization Assistant</h1>
+        <p>AI-Assisted Register Allocation & Instruction Selection</p>
+    </div>
 
     <form action="/optimize" method="POST">
 
         <label>Enter Source Code</label>
 
         <textarea name="code"
-                  placeholder="Example: a = b + c;"></textarea>
+        placeholder="Example:
+a = b + c
+d = a * e">{{ code if code else '' }}</textarea>
 
         <button type="submit">
             Optimize Code
@@ -27,16 +32,22 @@
 
     {% if code %}
 
-    <div class="result">
+    <div class="result-grid">
 
-        <h2>Source Code</h2>
-        <pre>{{ code }}</pre>
+        <div class="card">
+            <h2>📄 Source Code</h2>
+            <pre>{{ code }}</pre>
+        </div>
 
-        <h2>Register Allocation</h2>
-        <pre>{{ register }}</pre>
+        <div class="card">
+            <h2>🧠 Register Allocation</h2>
+            <pre>{{ register }}</pre>
+        </div>
 
-        <h2>Instruction Selection</h2>
-        <pre>{{ instruction }}</pre>
+        <div class="card full-width">
+            <h2>⚙️ Generated Assembly Code</h2>
+            <pre>{{ instruction }}</pre>
+        </div>
 
     </div>
 
