@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Compiler Optimization Assistant</title>
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>AI-Assisted Register Allocation and Instruction Selection</h1>
+
+    <form action="/optimize" method="POST">
+
+        <label>Enter Source Code</label>
+
+        <textarea name="code"
+                  placeholder="Example: a = b + c;"></textarea>
+
+        <button type="submit">
+            Optimize Code
+        </button>
+
+    </form>
+
+    {% if code %}
+
+    <div class="result">
+
+        <h2>Source Code</h2>
+        <pre>{{ code }}</pre>
+
+        <h2>Register Allocation</h2>
+        <pre>{{ register }}</pre>
+
+        <h2>Instruction Selection</h2>
+        <pre>{{ instruction }}</pre>
+
+    </div>
+
+    {% endif %}
+
+</div>
+
+</body>
+</html>
