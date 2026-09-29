@@ -1,154 +1,425 @@
 from flask import Flask, render_template, request
+import ast
 import re
 
 app = Flask(__name__)
 
 
-def allocate_register(var, reg_map, free_regs):
+# ============================================================
+# REGISTER ALLOCATION
+# ============================================================
 
-    if var in reg_map:
-        return reg_map[var]
+def collect_variables(source_code):
+    keywords = {
+        "while",
+        "for",
+        "if",
+        "else",
+        "end",
+        "to"
+    }
 
-    if free_regs:
-        reg = free_regs.pop(0)
-        reg_map[var] = reg
-        return reg
+    variables = set()
 
-    return None
+    for line in source_code.splitlines():
 
+        line = re.sub(r"#.*", "", line).strip()
 
-def load_operand(operand, reg_map, free_regs, assembly):
+        if not line:
+            continue
 
-    if operand.isdigit():
+        # Remove control keywords
+        cleaned = re.sub(
+            r"\b(while|for|if|else|end|to)\b",
+            " ",
+            line
+        )
 
-        if free_regs:
-            reg = free_regs.pop(0)
-            assembly.append(f"MOV {operand}, {reg}")
-            return reg
+        # Find identifiers
+        names = re.findall(
+            r"\b[a-zA-Z_]\w*\b",
+            cleaned
+        )
 
-    reg = allocate_register(
-        operand,
-        reg_map,
-        free_regs
-    )
+        for name in names:
+            if name not in keywords:
+                variables.add(name)
 
-    if reg is not None:
-        assembly.append(f"MOV {operand}, {reg}")
-        return reg
-
-    return "MEMORY"
-
-
-def generate_assignment(
-    dest,
-    op1,
-    operator,
-    op2,
-    reg_map,
-    free_regs,
-    assembly
-):
-
-    r1 = load_operand(
-        op1,
-        reg_map,
-        free_regs,
-        assembly
-    )
-
-    r2 = load_operand(
-        op2,
-        reg_map,
-        free_regs,
-        assembly
-    )
-
-    if r1 == "MEMORY":
-        assembly.append(f"LOAD {op1}, R1")
-        r1 = "R1"
-
-    if r2 == "MEMORY":
-        assembly.append(f"LOAD {op2}, R2")
-        r2 = "R2"
-
-    if operator == "+":
-        assembly.append(f"ADD {r1}, {r2}")
-
-    elif operator == "-":
-        assembly.append(f"SUB {r1}, {r2}")
-
-    elif operator == "*":
-        assembly.append(f"MUL {r1}, {r2}")
-
-    elif operator == "/":
-        assembly.append(f"DIV {r1}, {r2}")
-
-    reg_map[dest] = r1
-
-    assembly.append(
-        f"STORE {r1}, {dest}"
-    )
-
-    if r2 != r1 and r2 != "MEMORY":
-
-        used_by = [
-            v
-            for v, r in reg_map.items()
-            if r == r2
-        ]
-
-        for v in used_by:
-            del reg_map[v]
-
-        if r2 not in free_regs:
-            free_regs.append(r2)
+    return sorted(variables)
 
 
-def generate_assembly(source_code):
+def create_register_map(source_code):
 
-    assembly = []
-
-    free_regs = [
-        "R1",
-        "R2",
-        "R3",
-        "R4"
-    ]
+    variables = collect_variables(source_code)
 
     reg_map = {}
 
-    lines = source_code.splitlines()
+    for index, variable in enumerate(variables, start=1):
+        reg_map[variable] = f"R{index}"
+
+    return reg_map
+
+
+# ============================================================
+# TEMPORARY REGISTERS
+# ============================================================
+
+class TempRegisterManager:
+
+    def __init__(self):
+        self.counter = 1
+
+    def new(self):
+        reg = f"T{self.counter}"
+        self.counter += 1
+        return reg
+
+
+# ============================================================
+# EXPRESSION GENERATOR
+# ============================================================
+
+def generate_expression(node, reg_map, assembly, temp_manager):
+    """
+    Converts a Python-like arithmetic AST into assembly.
+
+    Example:
+
+        b + c * (d + e)
+
+    becomes instructions using registers.
+    """
+
+    # --------------------------------------------------------
+    # CONSTANT
+    # --------------------------------------------------------
+
+    if isinstance(node, ast.Constant):
+
+        temp = temp_manager.new()
+
+        assembly.append(
+            f"MOV {node.value}, {temp}"
+        )
+
+        return temp
+
+    # --------------------------------------------------------
+    # VARIABLE
+    # --------------------------------------------------------
+
+    if isinstance(node, ast.Name):
+
+        return reg_map[node.id]
+
+    # --------------------------------------------------------
+    # BINARY OPERATION
+    # --------------------------------------------------------
+
+    if isinstance(node, ast.BinOp):
+
+        left_reg = generate_expression(
+            node.left,
+            reg_map,
+            assembly,
+            temp_manager
+        )
+
+        right_reg = generate_expression(
+            node.right,
+            reg_map,
+            assembly,
+            temp_manager
+        )
+
+        result_reg = temp_manager.new()
+
+        assembly.append(
+            f"MOV {left_reg}, {result_reg}"
+        )
+
+        if isinstance(node.op, ast.Add):
+
+            assembly.append(
+                f"ADD {result_reg}, {right_reg}"
+            )
+
+        elif isinstance(node.op, ast.Sub):
+
+            assembly.append(
+                f"SUB {result_reg}, {right_reg}"
+            )
+
+        elif isinstance(node.op, ast.Mult):
+
+            assembly.append(
+                f"MUL {result_reg}, {right_reg}"
+            )
+
+        elif isinstance(node.op, ast.Div):
+
+            assembly.append(
+                f"DIV {result_reg}, {right_reg}"
+            )
+
+        else:
+
+            raise ValueError(
+                "Unsupported arithmetic operator"
+            )
+
+        return result_reg
+
+    # --------------------------------------------------------
+    # UNARY MINUS
+    # --------------------------------------------------------
+
+    if isinstance(node, ast.UnaryOp):
+
+        if isinstance(node.op, ast.USub):
+
+            value_reg = generate_expression(
+                node.operand,
+                reg_map,
+                assembly,
+                temp_manager
+            )
+
+            result_reg = temp_manager.new()
+
+            assembly.append(
+                f"MOV 0, {result_reg}"
+            )
+
+            assembly.append(
+                f"SUB {result_reg}, {value_reg}"
+            )
+
+            return result_reg
+
+    raise ValueError(
+        "Unsupported expression"
+    )
+
+
+# ============================================================
+# ASSIGNMENT
+# ============================================================
+
+def generate_assignment(
+    line,
+    reg_map,
+    assembly,
+    temp_manager
+):
+
+    match = re.match(
+        r"^\s*([a-zA-Z_]\w*)\s*=\s*(.+)$",
+        line
+    )
+
+    if not match:
+        return False
+
+    destination = match.group(1)
+    expression = match.group(2)
+
+    if destination not in reg_map:
+        raise ValueError(
+            f"Unknown variable: {destination}"
+        )
+
+    try:
+
+        tree = ast.parse(
+            expression,
+            mode="eval"
+        )
+
+        result_reg = generate_expression(
+            tree.body,
+            reg_map,
+            assembly,
+            temp_manager
+        )
+
+        destination_reg = reg_map[destination]
+
+        assembly.append(
+            f"MOV {result_reg}, {destination_reg}"
+        )
+
+        assembly.append(
+            f"STORE {destination_reg}, {destination}"
+        )
+
+        return True
+
+    except SyntaxError:
+
+        raise ValueError(
+            f"Invalid expression: {expression}"
+        )
+
+
+# ============================================================
+# CONDITION
+# ============================================================
+
+def generate_condition(
+    condition,
+    reg_map,
+    assembly,
+    temp_manager
+):
+    """
+    Generates CMP instruction and returns comparison operator.
+    """
+
+    try:
+
+        tree = ast.parse(
+            condition,
+            mode="eval"
+        )
+
+    except SyntaxError:
+
+        raise ValueError(
+            f"Invalid condition: {condition}"
+        )
+
+    if not isinstance(
+        tree.body,
+        ast.Compare
+    ):
+
+        raise ValueError(
+            f"Invalid condition: {condition}"
+        )
+
+    compare = tree.body
+
+    if len(compare.ops) != 1:
+        raise ValueError(
+            "Only one comparison is supported"
+        )
+
+    left_reg = generate_expression(
+        compare.left,
+        reg_map,
+        assembly,
+        temp_manager
+    )
+
+    right_reg = generate_expression(
+        compare.comparators[0],
+        reg_map,
+        assembly,
+        temp_manager
+    )
+
+    operator = compare.ops[0]
+
+    if isinstance(operator, ast.Lt):
+        op = "<"
+
+    elif isinstance(operator, ast.LtE):
+        op = "<="
+
+    elif isinstance(operator, ast.Gt):
+        op = ">"
+
+    elif isinstance(operator, ast.GtE):
+        op = ">="
+
+    elif isinstance(operator, ast.Eq):
+        op = "=="
+
+    elif isinstance(operator, ast.NotEq):
+        op = "!="
+
+    else:
+        raise ValueError(
+            "Unsupported comparison"
+        )
+
+    assembly.append(
+        f"CMP {left_reg}, {right_reg}"
+    )
+
+    return op
+
+
+# ============================================================
+# FALSE-CONDITION JUMP
+# ============================================================
+
+def false_jump(operator, label):
+
+    if operator == "<":
+        return f"JGE {label}"
+
+    if operator == "<=":
+        return f"JG {label}"
+
+    if operator == ">":
+        return f"JLE {label}"
+
+    if operator == ">=":
+        return f"JL {label}"
+
+    if operator == "==":
+        return f"JNE {label}"
+
+    if operator == "!=":
+        return f"JE {label}"
+
+    raise ValueError(
+        "Unknown comparison operator"
+    )
+
+
+# ============================================================
+# ASSEMBLY GENERATOR
+# ============================================================
+
+def generate_assembly(source_code, reg_map):
+
+    assembly = []
 
     label_counter = 1
 
     control_stack = []
 
-    for line in lines:
+    temp_manager = TempRegisterManager()
 
-        line = line.strip()
+    lines = source_code.splitlines()
 
-        if not line:
-            continue
+    for original_line in lines:
 
         line = re.sub(
-            r'#.*',
-            '',
-            line
+            r"#.*",
+            "",
+            original_line
         ).strip()
 
         if not line:
             continue
 
-        match = re.match(
-            r'while\s+(\w+|\d+)\s*(<=|>=|==|!=|<|>)\s*(\w+|\d+)',
-            line
+        # ====================================================
+        # WHILE
+        # ====================================================
+
+        while_match = re.match(
+            r"^while\s+(.+)$",
+            line,
+            re.IGNORECASE
         )
 
-        if match:
+        if while_match:
 
-            left = match.group(1)
-            operator = match.group(2)
-            right = match.group(3)
+            condition = while_match.group(1)
 
             start_label = f"L{label_counter}"
             end_label = f"L{label_counter + 1}"
@@ -165,52 +436,47 @@ def generate_assembly(source_code):
                 f"{start_label}:"
             )
 
-            assembly.append(
-                f"CMP {left}, {right}"
+            operator = generate_condition(
+                condition,
+                reg_map,
+                assembly,
+                temp_manager
             )
 
-            if operator == "<":
-                assembly.append(
-                    f"JGE {end_label}"
+            assembly.append(
+                false_jump(
+                    operator,
+                    end_label
                 )
-
-            elif operator == "<=":
-                assembly.append(
-                    f"JG {end_label}"
-                )
-
-            elif operator == ">":
-                assembly.append(
-                    f"JLE {end_label}"
-                )
-
-            elif operator == ">=":
-                assembly.append(
-                    f"JL {end_label}"
-                )
-
-            elif operator == "==":
-                assembly.append(
-                    f"JNE {end_label}"
-                )
-
-            elif operator == "!=":
-                assembly.append(
-                    f"JE {end_label}"
-                )
+            )
 
             continue
 
-        match = re.match(
-            r'for\s+(\w+)\s*=\s*(\d+)\s+to\s+(\d+)',
-            line
+        # ====================================================
+        # FOR
+        #
+        # for i = 0 to 5
+        # ====================================================
+
+        for_match = re.match(
+            r"^for\s+([a-zA-Z_]\w*)\s*=\s*(.+?)\s+to\s+(.+)$",
+            line,
+            re.IGNORECASE
         )
 
-        if match:
+        if for_match:
 
-            variable = match.group(1)
-            start_value = match.group(2)
-            end_value = match.group(3)
+            variable = for_match.group(1)
+            start_value = for_match.group(2)
+            end_value = for_match.group(3)
+
+            if variable not in reg_map:
+
+                raise ValueError(
+                    f"Unknown variable: {variable}"
+                )
+
+            variable_reg = reg_map[variable]
 
             start_label = f"L{label_counter}"
             end_label = f"L{label_counter + 1}"
@@ -225,22 +491,44 @@ def generate_assembly(source_code):
                 "end_value": end_value
             })
 
-            assembly.append(
-                f"MOV {start_value}, R1"
+            start_tree = ast.parse(
+                start_value,
+                mode="eval"
             )
 
-            reg_map[variable] = "R1"
+            start_reg = generate_expression(
+                start_tree.body,
+                reg_map,
+                assembly,
+                temp_manager
+            )
 
             assembly.append(
-                f"STORE R1, {variable}"
+                f"MOV {start_reg}, {variable_reg}"
+            )
+
+            assembly.append(
+                f"STORE {variable_reg}, {variable}"
             )
 
             assembly.append(
                 f"{start_label}:"
             )
 
+            end_tree = ast.parse(
+                end_value,
+                mode="eval"
+            )
+
+            end_reg = generate_expression(
+                end_tree.body,
+                reg_map,
+                assembly,
+                temp_manager
+            )
+
             assembly.append(
-                f"CMP {variable}, {end_value}"
+                f"CMP {variable_reg}, {end_reg}"
             )
 
             assembly.append(
@@ -249,16 +537,19 @@ def generate_assembly(source_code):
 
             continue
 
-        match = re.match(
-            r'if\s+(\w+|\d+)\s*(<=|>=|==|!=|<|>)\s*(\w+|\d+)',
-            line
+        # ====================================================
+        # IF
+        # ====================================================
+
+        if_match = re.match(
+            r"^if\s+(.+)$",
+            line,
+            re.IGNORECASE
         )
 
-        if match:
+        if if_match:
 
-            left = match.group(1)
-            operator = match.group(2)
-            right = match.group(3)
+            condition = if_match.group(1)
 
             else_label = f"L{label_counter}"
 
@@ -269,59 +560,116 @@ def generate_assembly(source_code):
                 "else": else_label
             })
 
-            assembly.append(
-                f"CMP {left}, {right}"
+            operator = generate_condition(
+                condition,
+                reg_map,
+                assembly,
+                temp_manager
             )
 
-            if operator == "<":
-                assembly.append(
-                    f"JGE {else_label}"
+            assembly.append(
+                false_jump(
+                    operator,
+                    else_label
                 )
-
-            elif operator == "<=":
-                assembly.append(
-                    f"JG {else_label}"
-                )
-
-            elif operator == ">":
-                assembly.append(
-                    f"JLE {else_label}"
-                )
-
-            elif operator == ">=":
-                assembly.append(
-                    f"JL {else_label}"
-                )
-
-            elif operator == "==":
-                assembly.append(
-                    f"JNE {else_label}"
-                )
-
-            elif operator == "!=":
-                assembly.append(
-                    f"JE {else_label}"
-                )
+            )
 
             continue
 
-        if line == "else":
+        # ====================================================
+        # ELSE
+        # ====================================================
 
-            if control_stack:
+        if line.lower() == "else":
 
-                current = control_stack[-1]
+            if not control_stack:
 
-                if current["type"] == "if":
+                raise ValueError(
+                    "Unexpected else"
+                )
 
-                    end_label = f"L{label_counter}"
+            current = control_stack[-1]
 
-                    label_counter += 1
+            if current["type"] != "if":
 
-                    current["end"] = end_label
+                raise ValueError(
+                    "else without if"
+                )
+
+            end_label = f"L{label_counter}"
+
+            label_counter += 1
+
+            current["end"] = end_label
+
+            assembly.append(
+                f"JMP {end_label}"
+            )
+
+            assembly.append(
+                f"{current['else']}:"
+            )
+
+            continue
+
+        # ====================================================
+        # END
+        # ====================================================
+
+        if line.lower() == "end":
+
+            if not control_stack:
+
+                raise ValueError(
+                    "Unexpected end"
+                )
+
+            current = control_stack.pop()
+
+            # WHILE
+            if current["type"] == "while":
+
+                assembly.append(
+                    f"JMP {current['start']}"
+                )
+
+                assembly.append(
+                    f"{current['end']}:"
+                )
+
+            # FOR
+            elif current["type"] == "for":
+
+                variable = current["variable"]
+
+                variable_reg = reg_map[variable]
+
+                assembly.append(
+                    f"ADD {variable_reg}, 1"
+                )
+
+                assembly.append(
+                    f"STORE {variable_reg}, {variable}"
+                )
+
+                assembly.append(
+                    f"JMP {current['start']}"
+                )
+
+                assembly.append(
+                    f"{current['end']}:"
+                )
+
+            # IF
+            elif current["type"] == "if":
+
+                if "end" in current:
 
                     assembly.append(
-                        f"JMP {end_label}"
+                        f"{current['end']}:"
                     )
+
+                else:
 
                     assembly.append(
                         f"{current['else']}:"
@@ -329,218 +677,102 @@ def generate_assembly(source_code):
 
             continue
 
-        if line == "end":
+        # ====================================================
+        # ASSIGNMENT
+        # ====================================================
 
-            if control_stack:
-
-                current = control_stack.pop()
-
-                if current["type"] == "while":
-
-                    assembly.append(
-                        f"JMP {current['start']}"
-                    )
-
-                    assembly.append(
-                        f"{current['end']}:"
-                    )
-
-                elif current["type"] == "for":
-
-                    variable = current["variable"]
-
-                    reg = allocate_register(
-                        variable,
-                        reg_map,
-                        free_regs
-                    )
-
-                    if reg is None:
-                        reg = "R1"
-
-                    assembly.append(
-                        f"MOV {variable}, {reg}"
-                    )
-
-                    assembly.append(
-                        f"ADD {reg}, 1"
-                    )
-
-                    assembly.append(
-                        f"STORE {reg}, {variable}"
-                    )
-
-                    assembly.append(
-                        f"JMP {current['start']}"
-                    )
-
-                    assembly.append(
-                        f"{current['end']}:"
-                    )
-
-                elif current["type"] == "if":
-
-                    if "end" in current:
-
-                        assembly.append(
-                            f"{current['end']}:"
-                        )
-
-                    else:
-
-                        assembly.append(
-                            f"{current['else']}:"
-                        )
-
-            continue
-
-        match = re.match(
-            r'(\w+)\s*=\s*(\w+|\d+)\s*([\+\-\*/])\s*(\w+|\d+)',
-            line
-        )
-
-        if match:
-
-            dest = match.group(1)
-            op1 = match.group(2)
-            operator = match.group(3)
-            op2 = match.group(4)
+        if "=" in line:
 
             generate_assignment(
-                dest,
-                op1,
-                operator,
-                op2,
+                line,
                 reg_map,
-                free_regs,
-                assembly
+                assembly,
+                temp_manager
             )
 
             continue
 
-        match = re.match(
-            r'(\w+)\s*=\s*(\w+|\d+)',
-            line
+        raise ValueError(
+            f"Unsupported statement: {line}"
         )
 
-        if match:
+    if control_stack:
 
-            dest = match.group(1)
-            value = match.group(2)
-
-            if value.isdigit():
-
-                if free_regs:
-                    reg = free_regs.pop(0)
-                else:
-                    reg = "R1"
-
-                assembly.append(
-                    f"MOV {value}, {reg}"
-                )
-
-            else:
-
-                reg = allocate_register(
-                    value,
-                    reg_map,
-                    free_regs
-                )
-
-                if reg is None:
-                    reg = "R1"
-
-                assembly.append(
-                    f"MOV {value}, {reg}"
-                )
-
-            reg_map[dest] = reg
-
-            assembly.append(
-                f"STORE {reg}, {dest}"
-            )
-
-            continue
+        raise ValueError(
+            "Missing 'end' statement"
+        )
 
     return "\n".join(assembly)
 
 
-@app.route('/')
+# ============================================================
+# HOME
+# ============================================================
+
+@app.route("/")
 def home():
 
     return render_template(
-        'index.html'
+        "index.html"
     )
 
 
+# ============================================================
+# OPTIMIZE
+# ============================================================
+
 @app.route(
-    '/optimize',
-    methods=['POST']
+    "/optimize",
+    methods=["POST"]
 )
 def optimize():
 
-    source_code = request.form['code']
+    source_code = request.form.get(
+        "code",
+        ""
+    )
 
-    variables = sorted(
-        set(
-            re.findall(
-                r'[a-zA-Z_]\w*',
-                source_code
-            )
+    try:
+
+        reg_map = create_register_map(
+            source_code
         )
-    )
 
-    keywords = {
-        "while",
-        "for",
-        "if",
-        "else",
-        "end",
-        "to"
-    }
+        instruction_result = generate_assembly(
+            source_code,
+            reg_map
+        )
 
-    variables = [
-        var
-        for var in variables
-        if var not in keywords
-    ]
+        register_result = "\n".join(
+            f"{variable} → {register}"
+            for variable, register
+            in reg_map.items()
+        )
 
-    register_result = ""
+        error = ""
 
-    registers = [
-        "R1",
-        "R2",
-        "R3",
-        "R4"
-    ]
+    except Exception as e:
 
-    for i, var in enumerate(variables):
+        instruction_result = ""
 
-        if i < len(registers):
+        register_result = ""
 
-            register_result += (
-                f"{var} → {registers[i]}\n"
-            )
-
-        else:
-
-            register_result += (
-                f"{var} → MEMORY\n"
-            )
-
-    instruction_result = generate_assembly(
-        source_code
-    )
+        error = str(e)
 
     return render_template(
-        'index.html',
+        "index.html",
         code=source_code,
         register=register_result,
-        instruction=instruction_result
+        instruction=instruction_result,
+        error=error
     )
 
 
-if __name__ == '__main__':
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
 
     app.run(
         debug=True
