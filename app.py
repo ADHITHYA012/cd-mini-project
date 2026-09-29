@@ -5,172 +5,539 @@ import re
 app = Flask(__name__)
 
 
-def collect_variables(source_code):
-    keywords = {
-        "while",
-        "for",
-        "if",
-        "else",
-        "int",
-        "float",
-        "double",
-        "char",
-        "long",
-        "short",
-        "to"
-    }
+def remove_comments(source):
 
-    variables = set()
+    source = re.sub(
+        r"#.*",
+        "",
+        source
+    )
 
-    for line in source_code.splitlines():
-        line = re.sub(r"#.*", "", line)
+    source = re.sub(
+        r"//.*",
+        "",
+        source
+    )
 
-        names = re.findall(
+    return source
+
+
+def split_program(source):
+
+    source = remove_comments(source)
+
+    source = source.replace(
+        "{",
+        "\n{\n"
+    )
+
+    source = source.replace(
+        "}",
+        "\n}\n"
+    )
+
+    source = source.replace(
+        ";",
+        ";\n"
+    )
+
+    lines = []
+
+    for line in source.splitlines():
+
+        line = line.strip()
+
+        if line:
+            lines.append(line)
+
+    return lines
+
+
+def get_variables(text):
+
+    return set(
+        re.findall(
             r"\b[a-zA-Z_]\w*\b",
-            line
+            text
+        )
+    )
+
+
+def expression_variables(expression):
+
+    try:
+
+        tree = ast.parse(
+            expression,
+            mode="eval"
         )
 
-        for name in names:
-            if name not in keywords:
-                variables.add(name)
+        return {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(
+                node,
+                ast.Name
+            )
+        }
 
-    return sorted(variables)
+    except:
+
+        return get_variables(
+            expression
+        )
 
 
-def create_register_map(source_code):
-    variables = collect_variables(source_code)
+def split_assignment(line):
 
-    return {
-        variable: f"R{i}"
-        for i, variable in enumerate(variables, 1)
-    }
+    line = line.strip()
+
+    line = line.rstrip(";")
+
+    match = re.match(
+        r"^([a-zA-Z_]\w*)\s*=\s*(.+)$",
+        line
+    )
+
+    if not match:
+        return None
+
+    return (
+        match.group(1),
+        match.group(2).strip()
+    )
 
 
-class TempRegisterManager:
+def normalize_increment(line):
+
+    line = line.strip()
+
+    line = line.rstrip(";")
+
+    match = re.match(
+        r"^(\w+)\+\+$",
+        line
+    )
+
+    if match:
+
+        v = match.group(1)
+
+        return f"{v} = {v} + 1"
+
+    match = re.match(
+        r"^\+\+(\w+)$",
+        line
+    )
+
+    if match:
+
+        v = match.group(1)
+
+        return f"{v} = {v} + 1"
+
+    match = re.match(
+        r"^(\w+)--$",
+        line
+    )
+
+    if match:
+
+        v = match.group(1)
+
+        return f"{v} = {v} - 1"
+
+    match = re.match(
+        r"^--(\w+)$",
+        line
+    )
+
+    if match:
+
+        v = match.group(1)
+
+        return f"{v} = {v} - 1"
+
+    match = re.match(
+        r"^(\w+)\s*\+=\s*(.+)$",
+        line
+    )
+
+    if match:
+
+        v = match.group(1)
+        value = match.group(2)
+
+        return f"{v} = {v} + {value}"
+
+    match = re.match(
+        r"^(\w+)\s*-=\s*(.+)$",
+        line
+    )
+
+    if match:
+
+        v = match.group(1)
+        value = match.group(2)
+
+        return f"{v} = {v} - {value}"
+
+    return line
+
+
+def analyze_liveness(lines):
+
+    required = set()
+
+    assignments = []
+
+    for index, line in enumerate(lines):
+
+        clean = line.strip()
+
+        if clean in {
+            "{",
+            "}"
+        }:
+            continue
+
+        for_match = re.match(
+            r"^for\s*\((.*)\)\s*$",
+            clean,
+            re.IGNORECASE
+        )
+
+        if for_match:
+
+            parts = [
+                x.strip()
+                for x in
+                for_match.group(1).split(";")
+            ]
+
+            if len(parts) == 3:
+
+                initialization = parts[0]
+                condition = parts[1]
+                increment = parts[2]
+
+                init = split_assignment(
+                    initialization
+                )
+
+                if init:
+
+                    assignments.append(
+                        (
+                            index,
+                            init[0],
+                            init[1]
+                        )
+                    )
+
+                required.update(
+                    expression_variables(
+                        condition
+                    )
+                )
+
+                increment = normalize_increment(
+                    increment
+                )
+
+                inc = split_assignment(
+                    increment
+                )
+
+                if inc:
+
+                    required.add(
+                        inc[0]
+                    )
+
+                    required.update(
+                        expression_variables(
+                            inc[1]
+                        )
+                    )
+
+            continue
+
+        while_match = re.match(
+            r"^while\s*\((.*)\)\s*$",
+            clean,
+            re.IGNORECASE
+        )
+
+        if while_match:
+
+            required.update(
+                expression_variables(
+                    while_match.group(1)
+                )
+            )
+
+            continue
+
+        if_match = re.match(
+            r"^if\s*\((.*)\)\s*$",
+            clean,
+            re.IGNORECASE
+        )
+
+        if if_match:
+
+            required.update(
+                expression_variables(
+                    if_match.group(1)
+                )
+            )
+
+            continue
+
+        assignment = split_assignment(
+            clean
+        )
+
+        if assignment:
+
+            destination = assignment[0]
+            expression = assignment[1]
+
+            assignments.append(
+                (
+                    index,
+                    destination,
+                    expression
+                )
+            )
+
+    changed = True
+
+    while changed:
+
+        changed = False
+
+        needed = set(required)
+
+        for index, destination, expression in reversed(
+            assignments
+        ):
+
+            if destination in needed:
+
+                variables = expression_variables(
+                    expression
+                )
+
+                before = len(needed)
+
+                needed.update(
+                    variables
+                )
+
+                if len(needed) != before:
+
+                    changed = True
+
+        if needed != required:
+
+            required = needed
+            changed = True
+
+    kept_lines = []
+
+    for index, line in enumerate(lines):
+
+        clean = line.strip()
+
+        assignment = split_assignment(
+            clean
+        )
+
+        if assignment:
+
+            destination = assignment[0]
+
+            if destination not in required:
+
+                continue
+
+        kept_lines.append(line)
+
+    return kept_lines, required
+
+
+def create_register_map(variables):
+
+    variables = sorted(
+        variables
+    )
+
+    registers = {}
+
+    for index, variable in enumerate(
+        variables,
+        1
+    ):
+
+        registers[
+            variable
+        ] = f"R{index}"
+
+    return registers
+
+
+class TemporaryManager:
 
     def __init__(self):
+
         self.count = 1
 
     def new(self):
+
         register = f"T{self.count}"
+
         self.count += 1
+
         return register
 
 
 def generate_expression(
     node,
-    reg_map,
+    registers,
     assembly,
-    temp_manager
+    temporary
 ):
 
-    if isinstance(node, ast.Constant):
+    if isinstance(
+        node,
+        ast.Constant
+    ):
 
-        register = temp_manager.new()
+        reg = temporary.new()
 
         assembly.append(
-            f"MOV {node.value}, {register}"
+            f"MOV {node.value}, {reg}"
         )
 
-        return register
+        return reg
 
-    if isinstance(node, ast.Name):
+    if isinstance(
+        node,
+        ast.Name
+    ):
 
         variable = node.id
 
-        if variable not in reg_map:
+        if variable not in registers:
+
             raise ValueError(
-                f"Unknown variable: {variable}"
+                f"Variable {variable} has no register"
             )
 
-        register = reg_map[variable]
+        reg = registers[
+            variable
+        ]
 
         assembly.append(
-            f"MOV {variable}, {register}"
+            f"MOV {variable}, {reg}"
         )
 
-        return register
+        return reg
 
-    if isinstance(node, ast.UnaryOp):
+    if isinstance(
+        node,
+        ast.BinOp
+    ):
 
-        if isinstance(node.op, ast.USub):
-
-            value_register = generate_expression(
-                node.operand,
-                reg_map,
-                assembly,
-                temp_manager
-            )
-
-            result_register = temp_manager.new()
-
-            assembly.append(
-                f"MOV 0, {result_register}"
-            )
-
-            assembly.append(
-                f"SUB {result_register}, {value_register}"
-            )
-
-            return result_register
-
-        raise ValueError(
-            "Unsupported unary operator"
-        )
-
-    if isinstance(node, ast.BinOp):
-
-        left_register = generate_expression(
+        left = generate_expression(
             node.left,
-            reg_map,
+            registers,
             assembly,
-            temp_manager
+            temporary
         )
 
-        right_register = generate_expression(
+        right = generate_expression(
             node.right,
-            reg_map,
+            registers,
             assembly,
-            temp_manager
+            temporary
         )
 
-        result_register = temp_manager.new()
+        result = temporary.new()
 
         assembly.append(
-            f"MOV {left_register}, {result_register}"
+            f"MOV {left}, {result}"
         )
 
-        if isinstance(node.op, ast.Add):
+        if isinstance(
+            node.op,
+            ast.Add
+        ):
 
             assembly.append(
-                f"ADD {result_register}, {right_register}"
+                f"ADD {result}, {right}"
             )
 
-        elif isinstance(node.op, ast.Sub):
+        elif isinstance(
+            node.op,
+            ast.Sub
+        ):
 
             assembly.append(
-                f"SUB {result_register}, {right_register}"
+                f"SUB {result}, {right}"
             )
 
-        elif isinstance(node.op, ast.Mult):
+        elif isinstance(
+            node.op,
+            ast.Mult
+        ):
 
             assembly.append(
-                f"MUL {result_register}, {right_register}"
+                f"MUL {result}, {right}"
             )
 
-        elif isinstance(node.op, ast.Div):
+        elif isinstance(
+            node.op,
+            ast.Div
+        ):
 
             assembly.append(
-                f"DIV {result_register}, {right_register}"
+                f"DIV {result}, {right}"
             )
 
         else:
 
             raise ValueError(
-                "Unsupported arithmetic operator"
+                "Unsupported operator"
             )
 
-        return result_register
+        return result
+
+    if isinstance(
+        node,
+        ast.UnaryOp
+    ):
+
+        value = generate_expression(
+            node.operand,
+            registers,
+            assembly,
+            temporary
+        )
+
+        result = temporary.new()
+
+        assembly.append(
+            f"MOV 0, {result}"
+        )
+
+        assembly.append(
+            f"SUB {result}, {value}"
+        )
+
+        return result
 
     raise ValueError(
         "Unsupported expression"
@@ -178,53 +545,44 @@ def generate_expression(
 
 
 def generate_assignment(
-    statement,
-    reg_map,
+    line,
+    registers,
     assembly,
-    temp_manager
+    temporary
 ):
 
-    statement = statement.strip()
-    statement = re.sub(
-        r"^(int|float|double|char|long|short)\s+",
-        "",
-        statement
+    assignment = split_assignment(
+        line
     )
 
-    match = re.match(
-        r"^([a-zA-Z_]\w*)\s*=\s*(.+)$",
-        statement
-    )
+    if not assignment:
+        return
 
-    if not match:
-        raise ValueError(
-            f"Invalid assignment: {statement}"
-        )
+    destination = assignment[0]
+    expression = assignment[1]
 
-    destination = match.group(1)
-    expression = match.group(2).strip()
+    if destination not in registers:
 
-    if destination not in reg_map:
-        raise ValueError(
-            f"Unknown variable: {destination}"
-        )
+        return
 
     tree = ast.parse(
         expression,
         mode="eval"
     )
 
-    result_register = generate_expression(
+    result = generate_expression(
         tree.body,
-        reg_map,
+        registers,
         assembly,
-        temp_manager
+        temporary
     )
 
-    destination_register = reg_map[destination]
+    destination_register = registers[
+        destination
+    ]
 
     assembly.append(
-        f"MOV {result_register}, {destination_register}"
+        f"MOV {result}, {destination_register}"
     )
 
     assembly.append(
@@ -234,9 +592,9 @@ def generate_assignment(
 
 def generate_condition(
     condition,
-    reg_map,
+    registers,
     assembly,
-    temp_manager
+    temporary
 ):
 
     tree = ast.parse(
@@ -244,293 +602,136 @@ def generate_condition(
         mode="eval"
     )
 
-    if not isinstance(
-        tree.body,
-        ast.Compare
-    ):
-        raise ValueError(
-            f"Invalid condition: {condition}"
-        )
-
     compare = tree.body
 
-    if len(compare.ops) != 1:
+    if not isinstance(
+        compare,
+        ast.Compare
+    ):
+
         raise ValueError(
-            "Only one comparison is supported"
+            "Invalid condition"
         )
 
-    left_register = generate_expression(
+    left = generate_expression(
         compare.left,
-        reg_map,
+        registers,
         assembly,
-        temp_manager
+        temporary
     )
 
-    right_register = generate_expression(
+    right = generate_expression(
         compare.comparators[0],
-        reg_map,
+        registers,
         assembly,
-        temp_manager
+        temporary
+    )
+
+    assembly.append(
+        f"CMP {left}, {right}"
     )
 
     operator = compare.ops[0]
 
-    if isinstance(operator, ast.Lt):
-        symbol = "<"
+    if isinstance(
+        operator,
+        ast.Lt
+    ):
+        return "<"
 
-    elif isinstance(operator, ast.LtE):
-        symbol = "<="
+    if isinstance(
+        operator,
+        ast.LtE
+    ):
+        return "<="
 
-    elif isinstance(operator, ast.Gt):
-        symbol = ">"
+    if isinstance(
+        operator,
+        ast.Gt
+    ):
+        return ">"
 
-    elif isinstance(operator, ast.GtE):
-        symbol = ">="
+    if isinstance(
+        operator,
+        ast.GtE
+    ):
+        return ">="
 
-    elif isinstance(operator, ast.Eq):
-        symbol = "=="
+    if isinstance(
+        operator,
+        ast.Eq
+    ):
+        return "=="
 
-    elif isinstance(operator, ast.NotEq):
-        symbol = "!="
-
-    else:
-        raise ValueError(
-            "Unsupported comparison"
-        )
-
-    assembly.append(
-        f"CMP {left_register}, {right_register}"
-    )
-
-    return symbol
-
-
-def false_jump(operator, label):
-
-    if operator == "<":
-        return f"JGE {label}"
-
-    if operator == "<=":
-        return f"JG {label}"
-
-    if operator == ">":
-        return f"JLE {label}"
-
-    if operator == ">=":
-        return f"JL {label}"
-
-    if operator == "==":
-        return f"JNE {label}"
-
-    if operator == "!=":
-        return f"JE {label}"
+    if isinstance(
+        operator,
+        ast.NotEq
+    ):
+        return "!="
 
     raise ValueError(
-        "Unknown comparison operator"
+        "Unsupported condition"
     )
 
 
-def normalize_increment(statement):
+def false_jump(
+    operator,
+    label
+):
 
-    statement = statement.strip()
+    jumps = {
+        "<": f"JGE {label}",
+        "<=": f"JG {label}",
+        ">": f"JLE {label}",
+        ">=": f"JL {label}",
+        "==": f"JNE {label}",
+        "!=": f"JE {label}"
+    }
 
-    match = re.match(
-        r"^(\w+)\s*\+\+$",
-        statement
-    )
-
-    if match:
-        return f"{match.group(1)} = {match.group(1)} + 1"
-
-    match = re.match(
-        r"^\+\+(\w+)$",
-        statement
-    )
-
-    if match:
-        return f"{match.group(1)} = {match.group(1)} + 1"
-
-    match = re.match(
-        r"^(\w+)\s*--$",
-        statement
-    )
-
-    if match:
-        return f"{match.group(1)} = {match.group(1)} - 1"
-
-    match = re.match(
-        r"^--(\w+)$",
-        statement
-    )
-
-    if match:
-        return f"{match.group(1)} = {match.group(1)} - 1"
-
-    match = re.match(
-        r"^(\w+)\s*\+=\s*(.+)$",
-        statement
-    )
-
-    if match:
-        return (
-            f"{match.group(1)} = "
-            f"{match.group(1)} + {match.group(2)}"
-        )
-
-    match = re.match(
-        r"^(\w+)\s*-=\s*(.+)$",
-        statement
-    )
-
-    if match:
-        return (
-            f"{match.group(1)} = "
-            f"{match.group(1)} - {match.group(2)}"
-        )
-
-    return statement
-
-
-def tokenize_source(source_code):
-
-    tokens = []
-    current = []
-    parenthesis_depth = 0
-
-    for char in source_code:
-
-        if char == "(":
-
-            parenthesis_depth += 1
-            current.append(char)
-
-        elif char == ")":
-
-            parenthesis_depth -= 1
-            current.append(char)
-
-        elif char == "{":
-
-            text = "".join(current).strip()
-
-            if text:
-                tokens.append(text)
-
-            current = []
-            tokens.append("{")
-
-        elif char == "}":
-
-            text = "".join(current).strip()
-
-            if text:
-                tokens.append(text)
-
-            current = []
-            tokens.append("}")
-
-        elif char == ";" and parenthesis_depth == 0:
-
-            text = "".join(current).strip()
-
-            if text:
-                tokens.append(text)
-
-            current = []
-
-        elif char == "\n" and parenthesis_depth == 0:
-
-            text = "".join(current).strip()
-
-            if text:
-                tokens.append(text)
-
-            current = []
-
-        else:
-
-            current.append(char)
-
-    text = "".join(current).strip()
-
-    if text:
-        tokens.append(text)
-
-    return tokens
+    return jumps[
+        operator
+    ]
 
 
 def generate_assembly(
-    source_code,
-    reg_map
+    lines,
+    registers
 ):
 
     assembly = []
 
-    tokens = tokenize_source(
-        source_code
-    )
+    temporary = TemporaryManager()
 
-    label_counter = 1
+    stack = []
 
-    control_stack = []
+    label = 1
 
-    temp_manager = TempRegisterManager()
+    for line in lines:
 
-    i = 0
-
-    while i < len(tokens):
-
-        line = tokens[i].strip()
+        line = line.strip()
 
         if not line:
-            i += 1
             continue
 
         if line == "{":
-            i += 1
+
             continue
 
         if line == "}":
 
-            if not control_stack:
-                raise ValueError(
-                    "Unexpected }"
-                )
-
-            current = control_stack[-1]
-
-            if (
-                current["type"] == "if"
-                and i + 1 < len(tokens)
-                and tokens[i + 1].strip().lower() == "else"
-            ):
-
-                end_label = f"L{label_counter}"
-                label_counter += 1
-
-                current["end"] = end_label
-
-                assembly.append(
-                    f"JMP {end_label}"
-                )
-
-                assembly.append(
-                    f"{current['else']}:"
-                )
-
-                i += 2
-
-                if (
-                    i < len(tokens)
-                    and tokens[i].strip() == "{"
-                ):
-                    i += 1
-
+            if not stack:
                 continue
 
-            current = control_stack.pop()
+            current = stack.pop()
 
-            if current["type"] == "while":
+            if current["type"] == "for":
+
+                generate_assignment(
+                    current["increment"],
+                    registers,
+                    assembly,
+                    temporary
+                )
 
                 assembly.append(
                     f"JMP {current['start']}"
@@ -540,14 +741,7 @@ def generate_assembly(
                     f"{current['end']}:"
                 )
 
-            elif current["type"] == "for":
-
-                generate_assignment(
-                    current["increment"],
-                    reg_map,
-                    assembly,
-                    temp_manager
-                )
+            elif current["type"] == "while":
 
                 assembly.append(
                     f"JMP {current['start']}"
@@ -559,152 +753,10 @@ def generate_assembly(
 
             elif current["type"] == "if":
 
-                if "end" in current:
-
-                    assembly.append(
-                        f"{current['end']}:"
-                    )
-
-                else:
-
-                    assembly.append(
-                        f"{current['else']}:"
-                    )
-
-            i += 1
-            continue
-
-        if line.lower() == "end":
-
-            if not control_stack:
-                raise ValueError(
-                    "Unexpected end"
-                )
-
-            current = control_stack.pop()
-
-            if current["type"] == "while":
-
-                assembly.append(
-                    f"JMP {current['start']}"
-                )
-
                 assembly.append(
                     f"{current['end']}:"
                 )
 
-            elif current["type"] == "for":
-
-                generate_assignment(
-                    current["increment"],
-                    reg_map,
-                    assembly,
-                    temp_manager
-                )
-
-                assembly.append(
-                    f"JMP {current['start']}"
-                )
-
-                assembly.append(
-                    f"{current['end']}:"
-                )
-
-            elif current["type"] == "if":
-
-                if "end" in current:
-
-                    assembly.append(
-                        f"{current['end']}:"
-                    )
-
-                else:
-
-                    assembly.append(
-                        f"{current['else']}:"
-                    )
-
-            i += 1
-            continue
-
-        if line.lower() == "else":
-
-            if not control_stack:
-                raise ValueError(
-                    "Unexpected else"
-                )
-
-            current = control_stack[-1]
-
-            if current["type"] != "if":
-                raise ValueError(
-                    "else without if"
-                )
-
-            end_label = f"L{label_counter}"
-            label_counter += 1
-
-            current["end"] = end_label
-
-            assembly.append(
-                f"JMP {end_label}"
-            )
-
-            assembly.append(
-                f"{current['else']}:"
-            )
-
-            i += 1
-            continue
-
-        while_match = re.match(
-            r"^while\s*\((.*)\)\s*$",
-            line,
-            re.IGNORECASE
-        )
-
-        if not while_match:
-
-            while_match = re.match(
-                r"^while\s+(.+)$",
-                line,
-                re.IGNORECASE
-            )
-
-        if while_match:
-
-            condition = while_match.group(1)
-
-            start_label = f"L{label_counter}"
-            end_label = f"L{label_counter + 1}"
-
-            label_counter += 2
-
-            control_stack.append({
-                "type": "while",
-                "start": start_label,
-                "end": end_label
-            })
-
-            assembly.append(
-                f"{start_label}:"
-            )
-
-            operator = generate_condition(
-                condition,
-                reg_map,
-                assembly,
-                temp_manager
-            )
-
-            assembly.append(
-                false_jump(
-                    operator,
-                    end_label
-                )
-            )
-
-            i += 1
             continue
 
         for_match = re.match(
@@ -715,18 +767,16 @@ def generate_assembly(
 
         if for_match:
 
-            header = for_match.group(1)
-
             parts = [
-                part.strip()
-                for part in header.split(";")
+                x.strip()
+                for x in
+                for_match.group(1).split(";")
             ]
 
             if len(parts) != 3:
 
                 raise ValueError(
-                    "For loop must be: "
-                    "for(i = 0; i < 5; i++)"
+                    "Invalid for loop"
                 )
 
             initialization = parts[0]
@@ -735,30 +785,17 @@ def generate_assembly(
                 parts[2]
             )
 
-            initialization = re.sub(
-                r"^(int|float|double|char|long|short)\s+",
-                "",
-                initialization
-            )
-
-            start_label = f"L{label_counter}"
-            end_label = f"L{label_counter + 1}"
-
-            label_counter += 2
-
             generate_assignment(
                 initialization,
-                reg_map,
+                registers,
                 assembly,
-                temp_manager
+                temporary
             )
 
-            control_stack.append({
-                "type": "for",
-                "start": start_label,
-                "end": end_label,
-                "increment": increment
-            })
+            start_label = f"L{label}"
+            end_label = f"L{label + 1}"
+
+            label += 2
 
             assembly.append(
                 f"{start_label}:"
@@ -766,9 +803,9 @@ def generate_assembly(
 
             operator = generate_condition(
                 condition,
-                reg_map,
+                registers,
                 assembly,
-                temp_manager
+                temporary
             )
 
             assembly.append(
@@ -778,7 +815,54 @@ def generate_assembly(
                 )
             )
 
-            i += 1
+            stack.append({
+                "type": "for",
+                "start": start_label,
+                "end": end_label,
+                "increment": increment
+            })
+
+            continue
+
+        while_match = re.match(
+            r"^while\s*\((.*)\)\s*$",
+            line,
+            re.IGNORECASE
+        )
+
+        if while_match:
+
+            condition = while_match.group(1)
+
+            start_label = f"L{label}"
+            end_label = f"L{label + 1}"
+
+            label += 2
+
+            assembly.append(
+                f"{start_label}:"
+            )
+
+            operator = generate_condition(
+                condition,
+                registers,
+                assembly,
+                temporary
+            )
+
+            assembly.append(
+                false_jump(
+                    operator,
+                    end_label
+                )
+            )
+
+            stack.append({
+                "type": "while",
+                "start": start_label,
+                "end": end_label
+            })
+
             continue
 
         if_match = re.match(
@@ -787,31 +871,20 @@ def generate_assembly(
             re.IGNORECASE
         )
 
-        if not if_match:
-
-            if_match = re.match(
-                r"^if\s+(.+)$",
-                line,
-                re.IGNORECASE
-            )
-
         if if_match:
 
             condition = if_match.group(1)
 
-            else_label = f"L{label_counter}"
-            label_counter += 1
+            else_label = f"L{label}"
+            end_label = f"L{label + 1}"
 
-            control_stack.append({
-                "type": "if",
-                "else": else_label
-            })
+            label += 2
 
             operator = generate_condition(
                 condition,
-                reg_map,
+                registers,
                 assembly,
-                temp_manager
+                temporary
             )
 
             assembly.append(
@@ -821,36 +894,50 @@ def generate_assembly(
                 )
             )
 
-            i += 1
+            stack.append({
+                "type": "if",
+                "start": else_label,
+                "end": end_label
+            })
+
             continue
 
-        line = line.rstrip(";").strip()
+        if line.lower() == "else":
 
-        line = normalize_increment(line)
+            if stack:
+
+                current = stack[-1]
+
+                if current["type"] == "if":
+
+                    assembly.append(
+                        f"JMP {current['end']}"
+                    )
+
+                    assembly.append(
+                        f"{current['start']}:"
+                    )
+
+            continue
+
+        line = line.rstrip(";")
+
+        line = normalize_increment(
+            line
+        )
 
         if "=" in line:
 
             generate_assignment(
                 line,
-                reg_map,
+                registers,
                 assembly,
-                temp_manager
+                temporary
             )
 
-            i += 1
-            continue
-
-        raise ValueError(
-            f"Unsupported statement: {line}"
-        )
-
-    if control_stack:
-
-        raise ValueError(
-            "Missing closing brace or end"
-        )
-
-    return "\n".join(assembly)
+    return "\n".join(
+        assembly
+    )
 
 
 @app.route("/")
@@ -874,24 +961,38 @@ def optimize():
 
     try:
 
-        reg_map = create_register_map(
+        original_lines = split_program(
             source_code
         )
 
+        optimized_lines, required = analyze_liveness(
+            original_lines
+        )
+
+        registers = create_register_map(
+            required
+        )
+
         assembly = generate_assembly(
-            source_code,
-            reg_map
+            optimized_lines,
+            registers
         )
 
         register_result = "\n".join(
             f"{variable} → {register}"
             for variable, register
-            in reg_map.items()
+            in registers.items()
+        )
+
+        optimized_source = "\n".join(
+            optimized_lines
         )
 
         error = ""
 
     except Exception as e:
+
+        optimized_source = ""
 
         register_result = ""
 
@@ -902,6 +1003,7 @@ def optimize():
     return render_template(
         "index.html",
         code=source_code,
+        optimized=optimized_source,
         register=register_result,
         instruction=assembly,
         error=error
@@ -909,6 +1011,7 @@ def optimize():
 
 
 if __name__ == "__main__":
+
     app.run(
         debug=True
     )
