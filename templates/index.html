@@ -1,59 +1,154 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+
 <head>
-    <title>AI Compiler Optimization Assistant</title>
-    <link rel="stylesheet"
-          href="{{ url_for('static', filename='style.css') }}">
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Multi Language Compiler</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+
 </head>
 
 <body>
 
-<div class="container">
+    <div class="container">
 
-    <div class="header">
-        <h1>🚀 AI Compiler Optimization Assistant</h1>
-        <p>AI-Assisted Register Allocation & Instruction Selection</p>
+        <header>
+
+            <div class="logo">
+                ⚡
+            </div>
+
+            <div>
+                <h1>Code Compiler</h1>
+                <p>Multi-language compilation and execution</p>
+            </div>
+
+        </header>
+
+
+        <form
+            action="/run"
+            method="POST"
+        >
+
+            <div class="toolbar">
+
+                <label for="language">
+                    Select Language
+                </label>
+
+                <select
+                    name="language"
+                    id="language"
+                >
+
+                    <option value="c"
+                        {% if language == "c" %}selected{% endif %}>
+                        C
+                    </option>
+
+                    <option value="cpp"
+                        {% if language == "cpp" %}selected{% endif %}>
+                        C++
+                    </option>
+
+                    <option value="python"
+                        {% if language == "python" %}selected{% endif %}>
+                        Python
+                    </option>
+
+                    <option value="java"
+                        {% if language == "java" %}selected{% endif %}>
+                        Java
+                    </option>
+
+                </select>
+
+            </div>
+
+
+            <div class="editor">
+
+                <textarea
+                    name="code"
+                    spellcheck="false"
+                    placeholder="Enter your code here..."
+                >{{ code or '' }}</textarea>
+
+            </div>
+
+
+            <button type="submit">
+                ▶ Run Code
+            </button>
+
+        </form>
+
+
+        {% if error %}
+
+        <div class="error">
+            {{ error }}
+        </div>
+
+        {% endif %}
+
+
+        {% if status %}
+
+        <section class="result">
+
+            <div class="result-header">
+
+                <h2>Execution Result</h2>
+
+                <span class="
+                    {% if 'Successfully' in status %}
+                        success
+                    {% else %}
+                        failed
+                    {% endif %}
+                ">
+                    {{ status }}
+                </span>
+
+            </div>
+
+            <pre>{{ output }}</pre>
+
+        </section>
+
+        {% endif %}
+
+
+        <div class="supported">
+
+            <h3>Supported Languages</h3>
+
+            <div class="languages">
+
+                <span>🇨 C</span>
+                <span>⚙ C++</span>
+                <span>🐍 Python</span>
+                <span>☕ Java</span>
+
+            </div>
+
+        </div>
+
     </div>
-
-    <form action="/optimize" method="POST">
-
-        <label>Enter Source Code</label>
-
-        <textarea name="code"
-        placeholder="Example:
-a = b + c
-d = a * e">{{ code if code else '' }}</textarea>
-
-        <button type="submit">
-            Optimize Code
-        </button>
-
-    </form>
-
-    {% if code %}
-
-    <div class="result-grid">
-
-        <div class="card">
-            <h2>📄 Source Code</h2>
-            <pre>{{ code }}</pre>
-        </div>
-
-        <div class="card">
-            <h2>🧠 Register Allocation</h2>
-            <pre>{{ register }}</pre>
-        </div>
-
-        <div class="card full-width">
-            <h2>⚙️ Generated Assembly Code</h2>
-            <pre>{{ instruction }}</pre>
-        </div>
-
-    </div>
-
-    {% endif %}
-
-</div>
 
 </body>
+
 </html>
