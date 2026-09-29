@@ -1,710 +1,244 @@
 from flask import Flask, render_template, request
-import ast
 import re
 
 app = Flask(__name__)
 
 
-def remove_comments(source):
-
-    source = re.sub(
-        r"#.*",
-        "",
-        source
-    )
-
-    source = re.sub(
-        r"//.*",
-        "",
-        source
-    )
-
-    return source
+def is_number(value):
+    return re.fullmatch(r"-?\d+", value) is not None
 
 
-def split_program(source):
+def allocate_register(var, reg_map, free_regs):
+    if var in reg_map:
+        return reg_map[var]
 
-    source = remove_comments(source)
+    if free_regs:
+        reg = free_regs.pop(0)
+        reg_map[var] = reg
+        return reg
 
-    source = source.replace(
-        "{",
-        "\n{\n"
-    )
-
-    source = source.replace(
-        "}",
-        "\n}\n"
-    )
-
-    source = source.replace(
-        ";",
-        ";\n"
-    )
-
-    lines = []
-
-    for line in source.splitlines():
-
-        line = line.strip()
-
-        if line:
-            lines.append(line)
-
-    return lines
+    return None
 
 
-def get_variables(text):
+def get_register(var, reg_map, free_regs):
+    if var in reg_map:
+        return reg_map[var]
 
-    return set(
-        re.findall(
-            r"\b[a-zA-Z_]\w*\b",
-            text
-        )
+    return allocate_register(
+        var,
+        reg_map,
+        free_regs
     )
 
 
-def expression_variables(expression):
+def load_value(value, reg_map, free_regs, assembly):
 
-    try:
+    if is_number(value):
+        reg = free_regs.pop(0) if free_regs else "R1"
 
-        tree = ast.parse(
-            expression,
-            mode="eval"
+        assembly.append(
+            f"MOV {value}, {reg}"
         )
 
-        return {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(
-                node,
-                ast.Name
-            )
-        }
+        return reg
 
-    except:
-
-        return get_variables(
-            expression
-        )
-
-
-def split_assignment(line):
-
-    line = line.strip()
-
-    line = line.rstrip(";")
-
-    match = re.match(
-        r"^([a-zA-Z_]\w*)\s*=\s*(.+)$",
-        line
+    reg = get_register(
+        value,
+        reg_map,
+        free_regs
     )
 
-    if not match:
-        return None
+    if reg is None:
+        reg = "R1"
 
-    return (
-        match.group(1),
-        match.group(2).strip()
+    assembly.append(
+        f"MOV {value}, {reg}"
     )
 
-
-def normalize_increment(line):
-
-    line = line.strip()
-
-    line = line.rstrip(";")
-
-    match = re.match(
-        r"^(\w+)\+\+$",
-        line
-    )
-
-    if match:
-
-        v = match.group(1)
-
-        return f"{v} = {v} + 1"
-
-    match = re.match(
-        r"^\+\+(\w+)$",
-        line
-    )
-
-    if match:
-
-        v = match.group(1)
-
-        return f"{v} = {v} + 1"
-
-    match = re.match(
-        r"^(\w+)--$",
-        line
-    )
-
-    if match:
-
-        v = match.group(1)
-
-        return f"{v} = {v} - 1"
-
-    match = re.match(
-        r"^--(\w+)$",
-        line
-    )
-
-    if match:
-
-        v = match.group(1)
-
-        return f"{v} = {v} - 1"
-
-    match = re.match(
-        r"^(\w+)\s*\+=\s*(.+)$",
-        line
-    )
-
-    if match:
-
-        v = match.group(1)
-        value = match.group(2)
-
-        return f"{v} = {v} + {value}"
-
-    match = re.match(
-        r"^(\w+)\s*-=\s*(.+)$",
-        line
-    )
-
-    if match:
-
-        v = match.group(1)
-        value = match.group(2)
-
-        return f"{v} = {v} - {value}"
-
-    return line
-
-
-def analyze_liveness(lines):
-
-    required = set()
-
-    assignments = []
-
-    for index, line in enumerate(lines):
-
-        clean = line.strip()
-
-        if clean in {
-            "{",
-            "}"
-        }:
-            continue
-
-        for_match = re.match(
-            r"^for\s*\((.*)\)\s*$",
-            clean,
-            re.IGNORECASE
-        )
-
-        if for_match:
-
-            parts = [
-                x.strip()
-                for x in
-                for_match.group(1).split(";")
-            ]
-
-            if len(parts) == 3:
-
-                initialization = parts[0]
-                condition = parts[1]
-                increment = parts[2]
-
-                init = split_assignment(
-                    initialization
-                )
-
-                if init:
-
-                    assignments.append(
-                        (
-                            index,
-                            init[0],
-                            init[1]
-                        )
-                    )
-
-                required.update(
-                    expression_variables(
-                        condition
-                    )
-                )
-
-                increment = normalize_increment(
-                    increment
-                )
-
-                inc = split_assignment(
-                    increment
-                )
-
-                if inc:
-
-                    required.add(
-                        inc[0]
-                    )
-
-                    required.update(
-                        expression_variables(
-                            inc[1]
-                        )
-                    )
-
-            continue
-
-        while_match = re.match(
-            r"^while\s*\((.*)\)\s*$",
-            clean,
-            re.IGNORECASE
-        )
-
-        if while_match:
-
-            required.update(
-                expression_variables(
-                    while_match.group(1)
-                )
-            )
-
-            continue
-
-        if_match = re.match(
-            r"^if\s*\((.*)\)\s*$",
-            clean,
-            re.IGNORECASE
-        )
-
-        if if_match:
-
-            required.update(
-                expression_variables(
-                    if_match.group(1)
-                )
-            )
-
-            continue
-
-        assignment = split_assignment(
-            clean
-        )
-
-        if assignment:
-
-            destination = assignment[0]
-            expression = assignment[1]
-
-            assignments.append(
-                (
-                    index,
-                    destination,
-                    expression
-                )
-            )
-
-    changed = True
-
-    while changed:
-
-        changed = False
-
-        needed = set(required)
-
-        for index, destination, expression in reversed(
-            assignments
-        ):
-
-            if destination in needed:
-
-                variables = expression_variables(
-                    expression
-                )
-
-                before = len(needed)
-
-                needed.update(
-                    variables
-                )
-
-                if len(needed) != before:
-
-                    changed = True
-
-        if needed != required:
-
-            required = needed
-            changed = True
-
-    kept_lines = []
-
-    for index, line in enumerate(lines):
-
-        clean = line.strip()
-
-        assignment = split_assignment(
-            clean
-        )
-
-        if assignment:
-
-            destination = assignment[0]
-
-            if destination not in required:
-
-                continue
-
-        kept_lines.append(line)
-
-    return kept_lines, required
-
-
-def create_register_map(variables):
-
-    variables = sorted(
-        variables
-    )
-
-    registers = {}
-
-    for index, variable in enumerate(
-        variables,
-        1
-    ):
-
-        registers[
-            variable
-        ] = f"R{index}"
-
-    return registers
-
-
-class TemporaryManager:
-
-    def __init__(self):
-
-        self.count = 1
-
-    def new(self):
-
-        register = f"T{self.count}"
-
-        self.count += 1
-
-        return register
+    return reg
 
 
 def generate_expression(
-    node,
-    registers,
-    assembly,
-    temporary
+    dest,
+    op1,
+    operator,
+    op2,
+    reg_map,
+    free_regs,
+    assembly
 ):
 
-    if isinstance(
-        node,
-        ast.Constant
-    ):
+    r1 = load_value(
+        op1,
+        reg_map,
+        free_regs,
+        assembly
+    )
 
-        reg = temporary.new()
+    r2 = load_value(
+        op2,
+        reg_map,
+        free_regs,
+        assembly
+    )
 
+    if operator == "+":
         assembly.append(
-            f"MOV {node.value}, {reg}"
+            f"ADD {r1}, {r2}"
         )
 
-        return reg
+    elif operator == "-":
+        assembly.append(
+            f"SUB {r1}, {r2}"
+        )
 
-    if isinstance(
-        node,
-        ast.Name
-    ):
+    elif operator == "*":
+        assembly.append(
+            f"MUL {r1}, {r2}"
+        )
 
-        variable = node.id
+    elif operator == "/":
+        assembly.append(
+            f"DIV {r1}, {r2}"
+        )
 
-        if variable not in registers:
+    reg_map[dest] = r1
 
-            raise ValueError(
-                f"Variable {variable} has no register"
-            )
+    assembly.append(
+        f"STORE {r1}, {dest}"
+    )
 
-        reg = registers[
-            variable
+    if r2 != r1 and r2 in reg_map.values():
+
+        used_variables = [
+            v
+            for v, r in reg_map.items()
+            if r == r2
         ]
 
-        assembly.append(
-            f"MOV {variable}, {reg}"
-        )
+        for variable in used_variables:
+            if variable != dest:
+                del reg_map[variable]
 
-        return reg
-
-    if isinstance(
-        node,
-        ast.BinOp
-    ):
-
-        left = generate_expression(
-            node.left,
-            registers,
-            assembly,
-            temporary
-        )
-
-        right = generate_expression(
-            node.right,
-            registers,
-            assembly,
-            temporary
-        )
-
-        result = temporary.new()
-
-        assembly.append(
-            f"MOV {left}, {result}"
-        )
-
-        if isinstance(
-            node.op,
-            ast.Add
-        ):
-
-            assembly.append(
-                f"ADD {result}, {right}"
-            )
-
-        elif isinstance(
-            node.op,
-            ast.Sub
-        ):
-
-            assembly.append(
-                f"SUB {result}, {right}"
-            )
-
-        elif isinstance(
-            node.op,
-            ast.Mult
-        ):
-
-            assembly.append(
-                f"MUL {result}, {right}"
-            )
-
-        elif isinstance(
-            node.op,
-            ast.Div
-        ):
-
-            assembly.append(
-                f"DIV {result}, {right}"
-            )
-
-        else:
-
-            raise ValueError(
-                "Unsupported operator"
-            )
-
-        return result
-
-    if isinstance(
-        node,
-        ast.UnaryOp
-    ):
-
-        value = generate_expression(
-            node.operand,
-            registers,
-            assembly,
-            temporary
-        )
-
-        result = temporary.new()
-
-        assembly.append(
-            f"MOV 0, {result}"
-        )
-
-        assembly.append(
-            f"SUB {result}, {value}"
-        )
-
-        return result
-
-    raise ValueError(
-        "Unsupported expression"
-    )
+        if r2 not in free_regs:
+            free_regs.append(r2)
 
 
-def generate_assignment(
-    line,
-    registers,
-    assembly,
-    temporary
+def generate_simple_assignment(
+    dest,
+    value,
+    reg_map,
+    free_regs,
+    assembly
 ):
 
-    assignment = split_assignment(
-        line
+    reg = load_value(
+        value,
+        reg_map,
+        free_regs,
+        assembly
     )
 
-    if not assignment:
-        return
-
-    destination = assignment[0]
-    expression = assignment[1]
-
-    if destination not in registers:
-
-        return
-
-    tree = ast.parse(
-        expression,
-        mode="eval"
-    )
-
-    result = generate_expression(
-        tree.body,
-        registers,
-        assembly,
-        temporary
-    )
-
-    destination_register = registers[
-        destination
-    ]
+    reg_map[dest] = reg
 
     assembly.append(
-        f"MOV {result}, {destination_register}"
-    )
-
-    assembly.append(
-        f"STORE {destination_register}, {destination}"
+        f"STORE {reg}, {dest}"
     )
 
 
 def generate_condition(
-    condition,
-    registers,
-    assembly,
-    temporary
+    left,
+    operator,
+    right,
+    false_label,
+    assembly
 ):
-
-    tree = ast.parse(
-        condition,
-        mode="eval"
-    )
-
-    compare = tree.body
-
-    if not isinstance(
-        compare,
-        ast.Compare
-    ):
-
-        raise ValueError(
-            "Invalid condition"
-        )
-
-    left = generate_expression(
-        compare.left,
-        registers,
-        assembly,
-        temporary
-    )
-
-    right = generate_expression(
-        compare.comparators[0],
-        registers,
-        assembly,
-        temporary
-    )
 
     assembly.append(
         f"CMP {left}, {right}"
     )
 
-    operator = compare.ops[0]
+    if operator == "<":
+        assembly.append(
+            f"JGE {false_label}"
+        )
 
-    if isinstance(
-        operator,
-        ast.Lt
-    ):
-        return "<"
+    elif operator == "<=":
+        assembly.append(
+            f"JG {false_label}"
+        )
 
-    if isinstance(
-        operator,
-        ast.LtE
-    ):
-        return "<="
+    elif operator == ">":
+        assembly.append(
+            f"JLE {false_label}"
+        )
 
-    if isinstance(
-        operator,
-        ast.Gt
-    ):
-        return ">"
+    elif operator == ">=":
+        assembly.append(
+            f"JL {false_label}"
+        )
 
-    if isinstance(
-        operator,
-        ast.GtE
-    ):
-        return ">="
+    elif operator == "==":
+        assembly.append(
+            f"JNE {false_label}"
+        )
 
-    if isinstance(
-        operator,
-        ast.Eq
-    ):
-        return "=="
+    elif operator == "!=":
+        assembly.append(
+            f"JE {false_label}"
+        )
 
-    if isinstance(
-        operator,
-        ast.NotEq
-    ):
-        return "!="
 
-    raise ValueError(
-        "Unsupported condition"
+def clean_source(source_code):
+
+    source_code = re.sub(
+        r"#include\s*<[^>]+>",
+        "",
+        source_code
     )
 
+    source_code = re.sub(
+        r"#include\s*\"[^\"]+\"",
+        "",
+        source_code
+    )
 
-def false_jump(
-    operator,
-    label
-):
+    source_code = re.sub(
+        r"//.*",
+        "",
+        source_code
+    )
 
-    jumps = {
-        "<": f"JGE {label}",
-        "<=": f"JG {label}",
-        ">": f"JLE {label}",
-        ">=": f"JL {label}",
-        "==": f"JNE {label}",
-        "!=": f"JE {label}"
-    }
+    source_code = re.sub(
+        r"/\*.*?\*/",
+        "",
+        source_code,
+        flags=re.DOTALL
+    )
 
-    return jumps[
-        operator
-    ]
+    return source_code
 
 
-def generate_assembly(
-    lines,
-    registers
-):
+def generate_assembly(source_code):
+
+    source_code = clean_source(source_code)
 
     assembly = []
 
-    temporary = TemporaryManager()
+    reg_map = {}
 
-    stack = []
+    free_regs = [
+        "R1",
+        "R2",
+        "R3",
+        "R4"
+    ]
 
-    label = 1
+    label_counter = 1
+
+    control_stack = []
+
+    lines = source_code.splitlines()
 
     for line in lines:
 
@@ -713,231 +247,440 @@ def generate_assembly(
         if not line:
             continue
 
-        if line == "{":
+        if line in ["{", "}"]:
+            continue
+
+        if line.startswith("printf"):
+            continue
+
+        if line.startswith("return"):
+            continue
+
+        if line == "int main()" or line == "main()":
+            continue
+
+        if line.startswith("int main"):
+            continue
+
+        line = line.rstrip(";").strip()
+
+        if not line:
+            continue
+
+        if line == "else":
+            if control_stack:
+
+                current = control_stack[-1]
+
+                if current["type"] == "if":
+
+                    end_label = f"L{label_counter}"
+                    label_counter += 1
+
+                    current["end"] = end_label
+
+                    assembly.append(
+                        f"JMP {end_label}"
+                    )
+
+                    assembly.append(
+                        f"{current['else_label']}:"
+                    )
+
+            continue
+
+        if line.startswith("if"):
+
+            match = re.match(
+                r"if\s*\(\s*"
+                r"(\w+|\d+)\s*"
+                r"(<=|>=|==|!=|<|>)\s*"
+                r"(\w+|\d+)"
+                r"\s*\)",
+                line
+            )
+
+            if match:
+
+                left = match.group(1)
+                operator = match.group(2)
+                right = match.group(3)
+
+                false_label = f"L{label_counter}"
+                label_counter += 1
+
+                control_stack.append({
+                    "type": "if",
+                    "else_label": false_label
+                })
+
+                generate_condition(
+                    left,
+                    operator,
+                    right,
+                    false_label,
+                    assembly
+                )
+
+            continue
+
+        if line.startswith("while"):
+
+            match = re.match(
+                r"while\s*\(\s*"
+                r"(\w+|\d+)\s*"
+                r"(<=|>=|==|!=|<|>)\s*"
+                r"(\w+|\d+)"
+                r"\s*\)",
+                line
+            )
+
+            if match:
+
+                left = match.group(1)
+                operator = match.group(2)
+                right = match.group(3)
+
+                start_label = f"L{label_counter}"
+                end_label = f"L{label_counter + 1}"
+
+                label_counter += 2
+
+                control_stack.append({
+                    "type": "while",
+                    "start": start_label,
+                    "end": end_label
+                })
+
+                assembly.append(
+                    f"{start_label}:"
+                )
+
+                generate_condition(
+                    left,
+                    operator,
+                    right,
+                    end_label,
+                    assembly
+                )
+
+            continue
+
+        if line.startswith("for"):
+
+            match = re.match(
+                r"for\s*\(\s*"
+                r"(\w+)\s*=\s*"
+                r"(\d+)\s*;\s*"
+                r"(\w+)\s*"
+                r"(<=|>=|<|>)\s*"
+                r"(\w+|\d+)\s*;\s*"
+                r"(\w+)\s*=\s*"
+                r"(\w+)\s*"
+                r"([\+\-])\s*"
+                r"(\d+)"
+                r"\s*\)",
+                line
+            )
+
+            if match:
+
+                variable = match.group(1)
+                start_value = match.group(2)
+
+                condition_var = match.group(3)
+                condition_op = match.group(4)
+                condition_value = match.group(5)
+
+                increment_var = match.group(6)
+                increment_base = match.group(7)
+                increment_op = match.group(8)
+                increment_value = match.group(9)
+
+                start_label = f"L{label_counter}"
+                end_label = f"L{label_counter + 1}"
+
+                label_counter += 2
+
+                control_stack.append({
+                    "type": "for",
+                    "variable": variable,
+                    "condition_var": condition_var,
+                    "condition_op": condition_op,
+                    "condition_value": condition_value,
+                    "increment_var": increment_var,
+                    "increment_base": increment_base,
+                    "increment_op": increment_op,
+                    "increment_value": increment_value,
+                    "start": start_label,
+                    "end": end_label
+                })
+
+                generate_simple_assignment(
+                    variable,
+                    start_value,
+                    reg_map,
+                    free_regs,
+                    assembly
+                )
+
+                assembly.append(
+                    f"{start_label}:"
+                )
+
+                generate_condition(
+                    condition_var,
+                    condition_op,
+                    condition_value,
+                    end_label,
+                    assembly
+                )
+
+            continue
+
+        match = re.match(
+            r"(?:int|float|double|char)\s+"
+            r"(\w+)\s*=\s*"
+            r"(\w+|\d+)\s*"
+            r"([\+\-\*/])\s*"
+            r"(\w+|\d+)",
+            line
+        )
+
+        if match:
+
+            dest = match.group(1)
+            op1 = match.group(2)
+            operator = match.group(3)
+            op2 = match.group(4)
+
+            generate_expression(
+                dest,
+                op1,
+                operator,
+                op2,
+                reg_map,
+                free_regs,
+                assembly
+            )
+
+            continue
+
+        match = re.match(
+            r"(?:int|float|double|char)\s+"
+            r"(\w+)\s*=\s*"
+            r"(\w+|\d+)",
+            line
+        )
+
+        if match:
+
+            dest = match.group(1)
+            value = match.group(2)
+
+            generate_simple_assignment(
+                dest,
+                value,
+                reg_map,
+                free_regs,
+                assembly
+            )
+
+            continue
+
+        match = re.match(
+            r"(?:int|float|double|char)\s+"
+            r"(\w+)\s*$",
+            line
+        )
+
+        if match:
+
+            variable = match.group(1)
+
+            get_register(
+                variable,
+                reg_map,
+                free_regs
+            )
+
+            continue
+
+        match = re.match(
+            r"(\w+)\s*=\s*"
+            r"(\w+|\d+)\s*"
+            r"([\+\-\*/])\s*"
+            r"(\w+|\d+)",
+            line
+        )
+
+        if match:
+
+            dest = match.group(1)
+            op1 = match.group(2)
+            operator = match.group(3)
+            op2 = match.group(4)
+
+            generate_expression(
+                dest,
+                op1,
+                operator,
+                op2,
+                reg_map,
+                free_regs,
+                assembly
+            )
+
+            continue
+
+        match = re.match(
+            r"(\w+)\s*=\s*"
+            r"(\w+|\d+)",
+            line
+        )
+
+        if match:
+
+            dest = match.group(1)
+            value = match.group(2)
+
+            generate_simple_assignment(
+                dest,
+                value,
+                reg_map,
+                free_regs,
+                assembly
+            )
 
             continue
 
         if line == "}":
 
-            if not stack:
-                continue
+            if control_stack:
 
-            current = stack.pop()
+                current = control_stack.pop()
 
-            if current["type"] == "for":
-
-                generate_assignment(
-                    current["increment"],
-                    registers,
-                    assembly,
-                    temporary
-                )
-
-                assembly.append(
-                    f"JMP {current['start']}"
-                )
-
-                assembly.append(
-                    f"{current['end']}:"
-                )
-
-            elif current["type"] == "while":
-
-                assembly.append(
-                    f"JMP {current['start']}"
-                )
-
-                assembly.append(
-                    f"{current['end']}:"
-                )
-
-            elif current["type"] == "if":
-
-                assembly.append(
-                    f"{current['end']}:"
-                )
-
-            continue
-
-        for_match = re.match(
-            r"^for\s*\((.*)\)\s*$",
-            line,
-            re.IGNORECASE
-        )
-
-        if for_match:
-
-            parts = [
-                x.strip()
-                for x in
-                for_match.group(1).split(";")
-            ]
-
-            if len(parts) != 3:
-
-                raise ValueError(
-                    "Invalid for loop"
-                )
-
-            initialization = parts[0]
-            condition = parts[1]
-            increment = normalize_increment(
-                parts[2]
-            )
-
-            generate_assignment(
-                initialization,
-                registers,
-                assembly,
-                temporary
-            )
-
-            start_label = f"L{label}"
-            end_label = f"L{label + 1}"
-
-            label += 2
-
-            assembly.append(
-                f"{start_label}:"
-            )
-
-            operator = generate_condition(
-                condition,
-                registers,
-                assembly,
-                temporary
-            )
-
-            assembly.append(
-                false_jump(
-                    operator,
-                    end_label
-                )
-            )
-
-            stack.append({
-                "type": "for",
-                "start": start_label,
-                "end": end_label,
-                "increment": increment
-            })
-
-            continue
-
-        while_match = re.match(
-            r"^while\s*\((.*)\)\s*$",
-            line,
-            re.IGNORECASE
-        )
-
-        if while_match:
-
-            condition = while_match.group(1)
-
-            start_label = f"L{label}"
-            end_label = f"L{label + 1}"
-
-            label += 2
-
-            assembly.append(
-                f"{start_label}:"
-            )
-
-            operator = generate_condition(
-                condition,
-                registers,
-                assembly,
-                temporary
-            )
-
-            assembly.append(
-                false_jump(
-                    operator,
-                    end_label
-                )
-            )
-
-            stack.append({
-                "type": "while",
-                "start": start_label,
-                "end": end_label
-            })
-
-            continue
-
-        if_match = re.match(
-            r"^if\s*\((.*)\)\s*$",
-            line,
-            re.IGNORECASE
-        )
-
-        if if_match:
-
-            condition = if_match.group(1)
-
-            else_label = f"L{label}"
-            end_label = f"L{label + 1}"
-
-            label += 2
-
-            operator = generate_condition(
-                condition,
-                registers,
-                assembly,
-                temporary
-            )
-
-            assembly.append(
-                false_jump(
-                    operator,
-                    else_label
-                )
-            )
-
-            stack.append({
-                "type": "if",
-                "start": else_label,
-                "end": end_label
-            })
-
-            continue
-
-        if line.lower() == "else":
-
-            if stack:
-
-                current = stack[-1]
-
-                if current["type"] == "if":
+                if current["type"] == "while":
 
                     assembly.append(
-                        f"JMP {current['end']}"
+                        f"JMP {current['start']}"
                     )
 
                     assembly.append(
-                        f"{current['start']}:"
+                        f"{current['end']}:"
                     )
 
-            continue
+                elif current["type"] == "for":
 
-        line = line.rstrip(";")
+                    variable = current["increment_var"]
 
-        line = normalize_increment(
-            line
-        )
+                    reg = get_register(
+                        variable,
+                        reg_map,
+                        free_regs
+                    )
 
-        if "=" in line:
+                    if reg is None:
+                        reg = "R1"
 
-            generate_assignment(
-                line,
-                registers,
-                assembly,
-                temporary
-            )
+                    assembly.append(
+                        f"MOV {variable}, {reg}"
+                    )
 
-    return "\n".join(
-        assembly
+                    if current["increment_op"] == "+":
+
+                        assembly.append(
+                            f"ADD {reg}, {current['increment_value']}"
+                        )
+
+                    else:
+
+                        assembly.append(
+                            f"SUB {reg}, {current['increment_value']}"
+                        )
+
+                    assembly.append(
+                        f"STORE {reg}, {variable}"
+                    )
+
+                    assembly.append(
+                        f"JMP {current['start']}"
+                    )
+
+                    assembly.append(
+                        f"{current['end']}:"
+                    )
+
+                elif current["type"] == "if":
+
+                    if "end" in current:
+
+                        assembly.append(
+                            f"{current['end']}:"
+                        )
+
+                    else:
+
+                        assembly.append(
+                            f"{current['else_label']}:"
+                        )
+
+    return "\n".join(assembly)
+
+
+def get_variables(source_code):
+
+    source_code = clean_source(source_code)
+
+    variables = set()
+
+    declarations = re.findall(
+        r"\b(?:int|float|double|char)\s+"
+        r"([a-zA-Z_]\w*)",
+        source_code
     )
+
+    variables.update(declarations)
+
+    assignments = re.findall(
+        r"\b([a-zA-Z_]\w*)\s*=",
+        source_code
+    )
+
+    variables.update(assignments)
+
+    for_loop = re.findall(
+        r"for\s*\(\s*"
+        r"(?:int\s+)?([a-zA-Z_]\w*)\s*=",
+        source_code
+    )
+
+    variables.update(for_loop)
+
+    keywords = {
+        "int",
+        "float",
+        "double",
+        "char",
+        "void",
+        "main",
+        "return",
+        "for",
+        "while",
+        "if",
+        "else",
+        "printf",
+        "scanf",
+        "include"
+    }
+
+    variables = [
+        variable
+        for variable in variables
+        if variable not in keywords
+    ]
+
+    return sorted(variables)
 
 
 @app.route("/")
@@ -959,54 +702,42 @@ def optimize():
         ""
     )
 
-    try:
+    variables = get_variables(
+        source_code
+    )
 
-        original_lines = split_program(
-            source_code
-        )
+    registers = [
+        "R1",
+        "R2",
+        "R3",
+        "R4"
+    ]
 
-        optimized_lines, required = analyze_liveness(
-            original_lines
-        )
+    register_result = ""
 
-        registers = create_register_map(
-            required
-        )
+    for i, variable in enumerate(variables):
 
-        assembly = generate_assembly(
-            optimized_lines,
-            registers
-        )
+        if i < len(registers):
 
-        register_result = "\n".join(
-            f"{variable} → {register}"
-            for variable, register
-            in registers.items()
-        )
+            register_result += (
+                f"{variable} → {registers[i]}\n"
+            )
 
-        optimized_source = "\n".join(
-            optimized_lines
-        )
+        else:
 
-        error = ""
+            register_result += (
+                f"{variable} → MEMORY\n"
+            )
 
-    except Exception as e:
-
-        optimized_source = ""
-
-        register_result = ""
-
-        assembly = ""
-
-        error = str(e)
+    instruction_result = generate_assembly(
+        source_code
+    )
 
     return render_template(
         "index.html",
         code=source_code,
-        optimized=optimized_source,
         register=register_result,
-        instruction=assembly,
-        error=error
+        instruction=instruction_result
     )
 
 
